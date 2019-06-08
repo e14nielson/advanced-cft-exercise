@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Data VPC
+Parameters:
+  ClassB:
+    Description: Class B of VPC (10.XXX.0.0/16)
+    Type: Number
+    ConstraintDescription: Must be in the range [0-255]
+    MinValue: 0
+    MaxValue: 255
+    Default: 0
+  Email:
+    Type: String
+    Description: Email to notify
+    Default: e14nielson@gmail.com
+  Environment:
+    Description: dev/data
+    Type: String
+    AllowedValues: ["dev", "data"]
+    Default: dev
+Resources:
+  VPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../templates/vpc_cft.yaml
+      Parameters:
+        ParentStack: !Sub "${AWS::StackName}"
+        ClassB: !Ref ClassB
+  SubnetA:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../templates/subnet_nat_cft.yaml
+      Parameters:
+        ParentStack: !Sub "${AWS::StackName}"
+        ClassB: !Ref ClassB
+        ClassCPublic: '0'
+        ClassCPrivate: '16'
+        VPC: !GetAtt VPC.Outputs.VPC
+        InternetGateway: !GetAtt VPC.Outputs.InternetGateway
+        NetworkAclPublic: !GetAtt VPC.Outputs.NetworkAclPublic
+        NetworkAclPrivate: !GetAtt VPC.Outputs.NetworkAclPrivate
+        AZIndex: '0'
+  SubnetB:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../templates/subnet_nat_cft.yaml
+      Parameters:
+        ParentStack: !Sub "${AWS::StackName}"
+        ClassB: !Ref ClassB
+        ClassCPublic: '32'
+        ClassCPrivate: '48'
+        VPC: !GetAtt VPC.Outputs.VPC
+        InternetGateway: !GetAtt VPC.Outputs.InternetGateway
+        NetworkAclPublic: !GetAtt VPC.Outputs.NetworkAclPublic
+        NetworkAclPrivate: !GetAtt VPC.Outputs.NetworkAclPrivate
+        AZIndex: '1'
+  Table:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../templates/table_cft.yaml
+      Parameters:
+        ParentStack: !Sub "${AWS::StackName}"
+  DLQ:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../templates/dlq_cft.yaml
+      Parameters:
+        ParentStack: !Sub "${AWS::StackName}"
+        Email: !Ref Email
+  Process:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../templates/process_cft.yaml
+      Parameters:
+        ParentStack: !Sub "${AWS::StackName}"
+        Email: !Ref Email
+        Table: !GetAtt Table.Outputs.Name
+        DLQ: !GetAtt DLQ.Outputs.Arn
+        SG: !GetAtt VPC.Outputs.SecurityGroup
+        SubnetA: !GetAtt SubnetA.Outputs.SubnetPrivate
+        SubnetB: !GetAtt SubnetB.Outputs.SubnetPrivate
+  API:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ../templates/api_cft.yaml
+      Parameters:
+        ParentStack: !Sub "${AWS::StackName}"
+        LambdaName: !GetAtt Process.Outputs.SplitLambdaName
+        LambdaURI: !GetAtt Process.Outputs.SplitLambdaURI
+        Environment: !Ref Environment
+Outputs:
+  FullURL:
+    Description: full url
+    Value: !Sub '${API.Outputs.InvokeURL}${Process.Outputs.SplitLambdaName}'
+    Export:
+      Name: !Sub 'url-${AWS::StackName}'

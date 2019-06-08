@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: A beginners template to cloudformation
+Parameters:
+  ParentStack:
+    Type: String
+    Description: Name of parent stack
+    Default: my-parent
+  Table:
+    Type: String
+    Description: DynamoDB table to use
+  Email:
+    Description: Email subscription to the topic
+    Type: String
+  DLQ:
+    Description: Arn of the DLQ
+    Type: String
+  QueueMaxReceiveCount:
+    Type: Number
+    Description: Maximum number of sqs retries
+    Default: 3
+  QueueVisibilityTimeout:
+    Type: Number
+    Description: Timeout visibility of SQS messages
+    Default: 30
+  QueueBatchSize:
+    Type: Number
+    Description: Batch size lambda pulls from SQS
+    Default: 1
+  SG:
+    Type: AWS::EC2::SecurityGroup::Id
+  SubnetA:
+    Type: String
+  SubnetB:
+    Type: String
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+  SplitLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Sub '${ParentStack}-split-lambda'
+      Description: split items from api
+      Handler: "index.lambda_handler"
+      Role: !GetAtt "LambdaExecutionRole.Arn"
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+
+          client = boto3.client('sqs')
+
+          def send_message(queue, value):
+              response = client.send_message(
+              QueueUrl=queue,
+              MessageBody=value
+          )
+
+          def lambda_handler(event, context):
+              print(json.dumps(event))
+              list = json.loads(event['body'])['input']
+              for value in list:
+                  send_message(os.environ['Queue'], value)
+              return {
+                  'statusCode': 200,
+                  'body': 'success'
+              }
+
+      Environment:
+        Variables:
+          Queue: !Ref Queue
+      Runtime: "python3.6"
+      Timeout: 25
+  Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ParentStack}-queue'
+      DelaySeconds: 0
+      VisibilityTimeout: !Ref QueueVisibilityTimeout
+      RedrivePolicy:
+        deadLetterTargetArn: !Ref DLQ
+        maxReceiveCount: !Ref QueueMaxReceiveCount
+  LambdaFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: !Ref QueueBatchSize
+      Enabled: true
+      EventSourceArn: !GetAtt Queue.Arn
+      FunctionName: !GetAtt DeliverLambda.Arn
+  DeliverLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Sub '${ParentStack}-process-lambda'
+      Description: Deliver results
+      Handler: "index.lambda_handler"
+      Role: !GetAtt "LambdaExecutionRole.Arn"
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SG
+        SubnetIds:
+          - !Ref SubnetA
+          - !Ref SubnetB
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+          import urllib.request
+          import time
+
+          s3 = boto3.client('s3')
+          db = boto3.client('dynamodb')
+          sns = boto3.client('sns')
+
+          def put_object(bucket, ip, value, ts):
+              key = '{}/{}/{}.txt'.format(ip, value, ts)
+              response = s3.put_object(
+                  Bucket=bucket,
+                  Key=key,
+                  Body=str.encode(value))
+              print(f'put_object: {response}')
+
+          def put_item(table_name, ip):
+              response = db.put_item(
+                  Item={
+                      'IP': {
+                          'S': ip,
+                      },
+                      'values': {
+                          'L': []
+                      }
+                  },
+                  TableName=table_name,
+              )
+              print(f'put_item: {response}')
+
+
+          def update_item_ttl(table_name, ip, ttl):
+              response = db.update_item(
+                  Key={
+                      'IP': {
+                          'S': ip,
+                      }
+                  },
+                  AttributeUpdates={
+                      'ttl': {
+                          'Value': {
+                              'N': str(ttl)
+                          }
+                      }
+                  },
+                  ReturnValues='ALL_NEW',
+                  TableName=table_name,
+              )
+              print(f'update_item_ttl: {response}')
+
+
+          def update_item_value(table_name, ip, value, ts):
+              response = db.update_item(
+                  Key={
+                      'IP': {
+                          'S': ip,
+                      }
+                  },
+                  UpdateExpression='SET #ri = list_append (#ri, :vals)',
+                  ExpressionAttributeNames={
+                      '#ri': 'values'
+                  },
+                  ExpressionAttributeValues={
+                      ':vals': {
+                          'L': [{'S': f'{value}-{ts}'}]
+                      }
+                  },
+                  ReturnValues='ALL_NEW',
+                  TableName=table_name,
+              )
+              print(f'update_item_value: {response}')
+
+
+          def get_item(table_name, ip):
+              response = db.get_item(
+                  Key={
+                      'IP': {
+                          'S': ip,
+                      }
+                  },
+                  TableName=table_name
+              )
+              print(f'get_item: {response}')
+              if 'Item' in response:
+                  return response['Item']
+
+          def publish_message(topic, ip, value, ts):
+              subject = f'ip: {ip} value: {value} ts: {ts}'
+              response = sns.publish(
+                  TopicArn=topic,
+                  Message='empty',
+                  Subject=subject
+              )
+              print(f'publish_message: {response}')
+
+          def lambda_handler(event, context):
+            print(json.dumps(event))
+            topic = os.environ['Topic']
+            table = os.environ['Table']
+            bucket = os.environ['Bucket']
+            ip = urllib.request.urlopen('https://ident.me').read().decode('utf8')
+            ts = int(time.time())
+
+            for record in event['Records']:
+              value = record['body']
+              put_object(bucket, ip, value, ts)
+              item = get_item(table, ip)
+              if not item:
+                  put_item(table, ip)
+              update_item_value(table, ip, value, ts)
+              update_item_ttl(table, ip, ts + 86400)
+              publish_message(topic, ip, value, ts)
+
+      Environment:
+        Variables:
+          Topic: !Ref Topic
+          Bucket: !Ref Bucket
+          Table: !Ref Table
+      Runtime: "python3.6"
+      Timeout: 25
+  Topic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref Email
+          Protocol: "email"
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ParentStack}-bucket'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 1
+            Status: Enabled
+Outputs:
+  SplitLambdaName:
+    Description: split lambda name
+    Value: !Ref SplitLambda
+  SplitLambdaURI:
+    Description: split lambda uri
+    Value: !Sub
+      - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations"
+      - lambdaArn: !GetAtt "SplitLambda.Arn"

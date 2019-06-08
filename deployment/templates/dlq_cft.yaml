@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DLQ to use for sqs redrive and lambda retry
+Parameters:
+  ParentStack:
+    Type: String
+    Description: Name of parent stack
+    Default: my-parent
+  Email:
+    Type: String
+    Description: Email to notify on Alarm
+    Default: no-reply@nowhere.com
+Resources:
+  DLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ParentStack}_dlq'
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ParentStack}_alarm'
+      AlarmDescription: DLQ alarm
+      AlarmActions:
+        - Ref: Topic
+      OKActions:
+        - Ref: Topic
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value:
+            Ref: DLQ
+  Topic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        -
+          Endpoint: !Ref Email
+          Protocol: "email"
+Outputs:
+  TopicName:
+    Description: 'Topic name'
+    Value: !Ref Topic
+  Name:
+    Description: 'DLQ name'
+    Value: !GetAtt DLQ.QueueName
+  Arn:
+    Description: 'DLQ arn'
+    Value: !GetAtt DLQ.Arn

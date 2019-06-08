@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC with public and private subnets, Lambda Roles require AWSLambdaVPCAccessExecutionRole
+Parameters:
+  ParentStack:
+    Type: String
+    Description: Name of parent stack
+    Default: my-parent
+  ClassB:
+    Description: Class B of VPC (10.XXX.0.0/16)
+    Type: Number
+    ConstraintDescription: Must be in the range [0-255]
+    MinValue: 0
+    MaxValue: 255
+  ClassCPublic:
+    Description: Class B of VPC (10.0.XXX.0/16)
+    Type: Number
+    ConstraintDescription: Must be in the range [0-255]
+    MinValue: 0
+    MaxValue: 255
+  ClassCPrivate:
+    Description: Class B of VPC (10.0.XXX.0/16)
+    Type: Number
+    ConstraintDescription: Must be in the range [0-255]
+    MinValue: 0
+    MaxValue: 255
+  VPC:
+    Type: String
+  InternetGateway:
+    Type: String
+  NetworkAclPublic:
+    Type: String
+  NetworkAclPrivate:
+    Type: String
+  AZIndex:
+    Description: which index in the list of az's will this subnet use
+    Type: Number
+    ConstraintDescription: Must be in the range [0-5]
+    MinValue: 0
+    MaxValue: 5
+Resources:
+  #
+  # Public
+  #
+  SubnetPublic:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [!Ref AZIndex, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.${ClassCPublic}.0/20'
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub '${ParentStack}-public'
+      - Key: Reach
+        Value: public
+  RouteTablePublic:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ParentStack}-public'
+  RouteTablePublicInternetRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+  RouteTableAssociationPublic:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPublic
+      RouteTableId: !Ref RouteTablePublic
+  EIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: vpc
+  NatGateway:
+    Type: 'AWS::EC2::NatGateway'
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref SubnetPublic
+      Tags:
+        - Key: Name
+          Value: !Sub '${ParentStack}-public'
+  SubnetNetworkAclAssociationPublic:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPublic
+      NetworkAclId: !Ref NetworkAclPublic
+  #
+  # Private
+  #
+  SubnetPrivate:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [!Ref AZIndex, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.${ClassCPrivate}.0/20'
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub '${ParentStack}-private'
+      - Key: Reach
+        Value: private
+  RouteTablePrivate:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ParentStack}-private'
+  RouteTablePrivateNatGateway:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+  RouteTableAssociationPrivate:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPrivate
+      RouteTableId: !Ref RouteTablePrivate
+  SubnetNetworkAclAssociationPrivate:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref SubnetPrivate
+      NetworkAclId: !Ref NetworkAclPrivate
+Outputs:
+  SubnetPublic:
+    Description: 'Subnet public.'
+    Value: !Ref SubnetPublic
+  RouteTablePublic:
+    Description: 'Route table public.'
+    Value: !Ref RouteTablePublic
+  SubnetPrivate:
+    Description: 'Subnet private.'
+    Value: !Ref SubnetPrivate
+  RouteTablePrivate:
+    Description: 'Route table private.'
+    Value: !Ref RouteTablePrivate
